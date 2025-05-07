@@ -14,14 +14,14 @@ os.makedirs(COMPRESSED_FOLDER, exist_ok=True)
 os.makedirs(RESTORED_FOLDER, exist_ok=True)
 os.makedirs(GRAPHS_FOLDER, exist_ok=True)
 
-# Уровни качества для графика (начинаем с 1, затем шаг 5)
-GRAPH_QUALITIES = [1] + list(range(5, 101, 5))  # 1, 5, 10, 15,..., 100 (всего 21 точка)
-# Основные уровни качества для восстановления (должны быть в GRAPH_QUALITIES)
+# Основные уровни качества для восстановления изображений
 RESTORE_QUALITIES = [1, 20, 40, 60, 80, 100]
+# Все уровни качества для графика (включая дополнительные точки)
+GRAPH_QUALITIES = sorted(set(RESTORE_QUALITIES + list(range(0, 101, 5))))
 
 
-def process_compression(image_path, quality):
-    """Выполняет только сжатие и возвращает результаты"""
+def process_image(image_path, quality, restore=False):
+    """Обрабатывает изображение с заданным качеством"""
     base_name = os.path.splitext(os.path.basename(image_path))[0]
     compressed_path = os.path.join(COMPRESSED_FOLDER, f"{base_name}_q{quality}.bin")
 
@@ -29,43 +29,41 @@ def process_compression(image_path, quality):
     compress_to_file(image_path, compressed_path, quality=quality)
     compressed_size = os.path.getsize(compressed_path)
 
-    return {
+    result = {
         'quality': quality,
         'compressed_size': compressed_size,
         'compression_ratio': os.path.getsize(image_path) / compressed_size
     }
 
+    # Восстановление только если требуется
+    if restore:
+        output_path = os.path.join(RESTORED_FOLDER, f"{base_name}_q{quality}.png")
+        decompress_from_file(compressed_path, output_path)
 
-def restore_image(image_path, quality):
-    """Выполняет восстановление изображения"""
-    base_name = os.path.splitext(os.path.basename(image_path))[0]
-    compressed_path = os.path.join(COMPRESSED_FOLDER, f"{base_name}_q{quality}.bin")
-    output_path = os.path.join(RESTORED_FOLDER, f"{base_name}_q{quality}.png")
+        # Конвертируем в PNG
+        img = Image.open(output_path)
+        if img.format != 'PNG':
+            img.save(output_path, format='PNG')
 
-    # Восстановление и сохранение в PNG
-    decompress_from_file(compressed_path, output_path)
+        result['restored_size'] = os.path.getsize(output_path)
 
-    # Убедимся, что файл в формате PNG
-    img = Image.open(output_path)
-    if img.format != 'PNG':
-        img.save(output_path, format='PNG')
-
-    return os.path.getsize(output_path)
+    return result
 
 
-def create_compression_graph(image_name, results, restore_qualities):
+def create_compression_graph(image_name, results):
     """Создает и сохраняет график сжатия"""
     qualities = [r['quality'] for r in results]
     compressed_sizes = [r['compressed_size'] / 1024 for r in results]  # в KB
 
     plt.figure(figsize=(12, 6))
-    plt.plot(qualities, compressed_sizes, 'b-o', linewidth=2, markersize=5)
 
-    # Фильтруем точки восстановления, которые есть в результатах
+    # Основной график
+    plt.plot(qualities, compressed_sizes, 'b-', linewidth=2)
+
+    # Точки восстановления выделяем красным
     restore_points = [(q, s) for q, s in zip(qualities, compressed_sizes)
-                      if q in restore_qualities]
-
-    if restore_points:  # Проверяем, что есть точки для отображения
+                      if q in RESTORE_QUALITIES]
+    if restore_points:
         restore_q, restore_s = zip(*restore_points)
         plt.scatter(restore_q, restore_s, c='red', s=100,
                     label='Точки восстановления', zorder=5)
@@ -84,42 +82,81 @@ def create_compression_graph(image_name, results, restore_qualities):
 
 
 def main():
+    # 1. Сначала обрабатываем ключевые точки для восстановления
+    print("=== Этап 1: Восстановление изображений ===")
+    restore_results = {}
+
     for image_name in os.listdir(INPUT_FOLDER):
         if not image_name.lower().endswith(('.png', '.jpg', '.jpeg')):
             continue
 
-        print(f"\n=== Обработка {image_name} ===")
+        print(f"\nОбработка {image_name} для восстановления:")
         input_path = os.path.join(INPUT_FOLDER, image_name)
-        original_size = os.path.getsize(input_path)
+        image_results = []
 
-        # 1. Сжатие для всех точек графика (1,5,10,...,100)
-        print("Выполнение сжатия для графика (21 точка):")
-        compression_results = []
-        for quality in GRAPH_QUALITIES:
-            res = process_compression(input_path, quality)
-            compression_results.append(res)
-            print(f"q{quality:3d}: {res['compressed_size'] / 1024:6.1f} KB",
-                  end=' | ' if quality % 20 != 0 else '\n')
-
-        # 2. Сразу сохраняем график
-        graph_path = create_compression_graph(image_name, compression_results, RESTORE_QUALITIES)
-        print(f"\nГрафик сохранен: {graph_path}")
-
-        # 3. Восстановление для ключевых точек
-        print("\nВосстановление изображений для ключевых точек качества:")
         for quality in RESTORE_QUALITIES:
-            restored_size = restore_image(input_path, quality)
-            print(f"q{quality:3d}: восстановлено как PNG ({restored_size / 1024:.1f} KB)")
+            try:
+                res = process_image(input_path, quality, restore=True)
+                image_results.append(res)
+                if 'restored_size' in res:
+                    print(
+                        f"q{quality:3d}: сжато {res['compressed_size'] / 1024:.1f} KB, восстановлено {res['restored_size'] / 1024:.1f} KB")
+                else:
+                    print(f"q{quality:3d}: ошибка восстановления")
+            except Exception as e:
+                print(f"q{quality:3d}: ошибка обработки - {str(e)}")
+                image_results.append({
+                    'quality': quality,
+                    'compressed_size': 0,
+                    'compression_ratio': 0
+                })
 
-        # 4. Вывод сводки
-        print("\nСводка по ключевым точкам:")
-        print(f"{'Качество':<8} | {'Сжатый (KB)':<12} | {'Сжатие (x)':<10}")
-        print("-" * 35)
-        for q in RESTORE_QUALITIES:
-            res = next(r for r in compression_results if r['quality'] == q)
-            print(f"{q:<8} | {res['compressed_size'] / 1024:<12.2f} | {res['compression_ratio']:<10.2f}")
+        restore_results[image_name] = image_results
 
-        print(f"\nОригинальный размер: {original_size / 1024:.2f} KB")
+    # 2. Затем обрабатываем дополнительные точки для графиков
+    print("\n=== Этап 2: Подготовка данных для графиков ===")
+    graph_results = {}
+
+    for image_name in os.listdir(INPUT_FOLDER):
+        if not image_name.lower().endswith(('.png', '.jpg', '.jpeg')):
+            continue
+
+        print(f"\nДополнительная обработка {image_name} для графиков:")
+        input_path = os.path.join(INPUT_FOLDER, image_name)
+
+        # Получаем уже обработанные точки
+        existing_results = restore_results.get(image_name, [])
+        existing_qualities = {r['quality'] for r in existing_results}
+
+        image_results = existing_results.copy()
+
+        # Обрабатываем только новые точки качества
+        for quality in GRAPH_QUALITIES:
+            if quality in existing_qualities:
+                continue
+
+            try:
+                res = process_image(input_path, quality, restore=False)
+                image_results.append(res)
+                print(f"q{quality:3d}: сжато {res['compressed_size'] / 1024:.1f} KB")
+            except Exception as e:
+                print(f"q{quality:3d}: ошибка сжатия - {str(e)}")
+                image_results.append({
+                    'quality': quality,
+                    'compressed_size': 0,
+                    'compression_ratio': 0
+                })
+
+        graph_results[image_name] = sorted(image_results, key=lambda x: x['quality'])
+
+    # 3. Строим графики для всех изображений
+    print("\n=== Этап 3: Построение графиков ===")
+    for image_name, results in graph_results.items():
+        try:
+            graph_path = create_compression_graph(image_name, results)
+            print(f"График для {image_name} сохранен: {graph_path}")
+        except Exception as e:
+            print(f"Ошибка построения графика для {image_name}: {str(e)}")
 
     print("\n=== Обработка завершена ===")
     print(f"\nРезультаты сохранены в:")

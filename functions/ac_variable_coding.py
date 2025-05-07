@@ -104,6 +104,7 @@ def decode_ac_coefficients(bitstream, block_size=63, is_luma=True):
     current_pos = 0
     coeff_index = 0
 
+
     while coeff_index < block_size and current_pos < len(bitstream):
         # Поиск кода Хаффмана
         found = False

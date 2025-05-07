@@ -75,43 +75,76 @@ def inverse_process_channel(dc_bitstream: str, ac_bitstreams: list,
                             quant_matrix=None, original_shape: tuple = None,
                             block_size: int = 8, is_luma: bool = True) -> np.ndarray:
     """
-    Обратное преобразование с декодированием
+    Полностью переработанная функция восстановления канала с обработкой ошибок
     """
-    h_blocks = original_shape[0] // block_size
-    w_blocks = original_shape[1] // block_size
+    try:
+        # Проверка и подготовка параметров
+        if not original_shape or len(original_shape) != 2:
+            raise ValueError("Неверный формат original_shape")
 
-    # Восстановление DC-коэффициентов
-    print("  Декодирование DC...")
-    dc_coeffs = decode_dc_coefficients(dc_bitstream, h_blocks * w_blocks, is_luma)
+        h, w = original_shape
+        if h <= 0 or w <= 0:
+            raise ValueError("Неверные размеры изображения")
 
-    # Восстановление блоков
-    restored_blocks = np.zeros((h_blocks, w_blocks, block_size, block_size), dtype=np.float32)
+        h_blocks = (h + block_size - 1) // block_size
+        w_blocks = (w + block_size - 1) // block_size
 
-    print("  Декодирование AC...")
-    idx = 0
-    for i in range(h_blocks):
-        for j in range(w_blocks):
-            # Восстанавливаем AC-коэффициенты
-            ac_coeffs = decode_ac_coefficients(ac_bitstreams[idx], block_size * block_size - 1, is_luma)
+        # Инициализация выходного изображения
+        restored = np.zeros((h_blocks * block_size, w_blocks * block_size), dtype=np.float32)
 
-            # Собираем блок (DC + AC)
-            block = np.zeros((block_size, block_size))
-            block[0, 0] = dc_coeffs[idx]
-            restored_block = inverse_zigzag_scan(np.insert(ac_coeffs, 0, block[0, 0]), block_size)
+        # Декодирование DC коэффициентов
+        dc_coeffs = decode_dc_coefficients(dc_bitstream, h_blocks * w_blocks, is_luma)
 
-            # Обратное квантование
-            restored_blocks[i, j] = dequantize_blocks(restored_block[np.newaxis, np.newaxis, :, :], quant_matrix)[0, 0]
-            idx += 1
+        # Обработка каждого блока
+        for i in range(h_blocks):
+            for j in range(w_blocks):
+                idx = i * w_blocks + j
+                try:
+                    # Получаем DC коэффициент
+                    dc_value = dc_coeffs[idx] if idx < len(dc_coeffs) else 0
 
-    # Сборка изображения
-    print("  Сборка изображения...")
-    restored = np.zeros(original_shape, dtype=np.float32)
-    for i in range(h_blocks):
-        for j in range(w_blocks):
-            restored[i * block_size:(i + 1) * block_size,
-            j * block_size:(j + 1) * block_size] = idct2(restored_blocks[i, j])
+                    # Декодируем AC коэффициенты
+                    ac_coeffs = np.zeros(block_size * block_size - 1)
+                    if idx < len(ac_bitstreams) and ac_bitstreams[idx]:
+                        ac_coeffs = decode_ac_coefficients(ac_bitstreams[idx],
+                                                           block_size * block_size - 1,
+                                                           is_luma)
 
-    return restored
+                    # Собираем блок
+                    block_1d = np.insert(ac_coeffs, 0, dc_value)
+                    block_2d = inverse_zigzag_scan(block_1d, block_size)
+
+                    # Обратное квантование
+                    dequant_block = dequantize_blocks(block_2d[np.newaxis, np.newaxis, :, :],
+                                                      quant_matrix)[0, 0]
+
+                    # Обратное DCT
+                    idct_block = idct2(dequant_block)
+
+                    # Размещаем блок в изображении
+                    y_start, y_end = i * block_size, (i + 1) * block_size
+                    x_start, x_end = j * block_size, (j + 1) * block_size
+
+                    restored[y_start:y_end, x_start:x_end] = idct_block
+
+                except Exception as e:
+                    print(f"Ошибка в блоке ({i},{j}): {str(e)}")
+                    # Заполняем блок средним значением DC
+                    restored[i * block_size:(i + 1) * block_size,
+                    j * block_size:(j + 1) * block_size] = dc_value
+
+        # Обрезаем до исходного размера
+        restored = restored[:h, :w]
+
+        # Нормализация и преобразование типа
+        restored = np.clip(restored, 0, 255).astype(np.uint8)
+
+        return restored
+
+    except Exception as e:
+        print(f"Критическая ошибка в inverse_process_channel: {str(e)}")
+        # Возвращаем серое изображение в случае неудачи
+        return np.full(original_shape, 128, dtype=np.uint8)
 
 
 def pack_data(image_size, luma_quant_matrix, chroma_quant_matrix,
